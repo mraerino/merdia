@@ -1,0 +1,15 @@
+[package]
+name = "merdia"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.70"
+axum = { version = "0.6.12", features = ["macros"] }
+futures-util = "0.3.28"
+serde = { version = "1.0.159", features = ["derive"] }
+serde_json = "1.0.95"
+tokio = { version = "1.27.0", features = ["macros", "rt-multi-thread", "sync"] }
+tokio-stream = { version = "0.1.12", features = ["sync"] }
+# Use regular version once this commit has been released
+webrtc = { git = "https://github.com/webrtc-rs/webrtc", rev = "5aa49c03a183a610b44fe01e9531508e4fddecb1" }
