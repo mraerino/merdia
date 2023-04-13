@@ -35,26 +35,42 @@
       await parse();
     }
 
+    const displayMediaOptions = {
+      video: {
+        cursor: "always",
+      },
+      audio: false
+    };
+
     const connectWebRTC = async () => {
       const peerConn = new RTCPeerConnection({
         iceServers: [],
       });
-      // Offer to send 1 video
-      peerConn.addTransceiver("video", { direction: "sendonly" });
-
       peerConn.addEventListener("iceconnectionstatechange", () =>
         console.debug("connection state change:", peerConn.iceConnectionState)
       );
+      const gatherPromise = new Promise((resolve) => {
+        peerConn.addEventListener("icecandidate", ({ candidate }) => {
+          if (candidate === null) {
+            resolve()
+          }
+        })
+      })
 
-      const localDesc = await peerConn.createOffer();
-      await peerConn.setLocalDescription(localDesc);
+      const stream = await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);
+      stream.getTracks().forEach(track => peerConn.addTrack(track, stream));
+
+      const initialOffer = await peerConn.createOffer();
+      await peerConn.setLocalDescription(initialOffer);
+
+      await gatherPromise;
 
       const resp = await fetch("/screen_share", {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({ offer: localDesc })
+        body: JSON.stringify({ offer: peerConn.localDescription })
       });
 
       if (!resp.ok) {

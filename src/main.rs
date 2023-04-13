@@ -155,15 +155,15 @@ async fn screen_share(
     // Create a new RTCPeerConnection
     let peer_connection = state.api.new_peer_connection(state.config.clone()).await?;
 
-    // Allow us to receive 1 audio track, and 1 video track
-    peer_connection
-        .add_transceiver_from_kind(RTPCodecType::Audio, None)
-        .await?;
+    // Allow us to receive 1 video track
     peer_connection
         .add_transceiver_from_kind(RTPCodecType::Video, None)
         .await?;
 
-    peer_connection.on_track(Box::new(move |track, _, _| Box::pin(async {})));
+    peer_connection.on_track(Box::new(move |track, _, _| {
+        println!("got track: {:?}", track);
+        Box::pin(async {})
+    }));
 
     peer_connection.on_ice_connection_state_change(Box::new(
         move |connection_state: RTCIceConnectionState| {
@@ -202,6 +202,5 @@ async fn screen_share(
     let stream = stream::once(async { WebRTCResponse::Offer(local_desc) })
         .chain(ReceiverStream::new(candidate_rx).map(WebRTCResponse::Candidate))
         .map(|r| serde_json::to_string(&r));
-
     Ok(StreamBody::new(stream))
 }
