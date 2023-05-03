@@ -8,7 +8,9 @@ use axum::{
     Json, Router,
 };
 use futures_util::{stream, Stream, StreamExt};
-use gstreamer::{prelude::*, promise::Promise, Caps, Element, ElementFactory, Pipeline};
+use gstreamer::{
+    message::StateChanged, prelude::*, promise::Promise, Caps, Element, ElementFactory, Pipeline,
+};
 use gstreamer_sdp::SDPMessage;
 use gstreamer_webrtc::{
     WebRTCBundlePolicy, WebRTCFECType, WebRTCICEGatheringState, WebRTCRTPTransceiver,
@@ -23,6 +25,7 @@ use std::{
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use tracing::{debug, info, trace};
 
 enum HttpError {
     InternalServerError(anyhow::Error),
@@ -57,6 +60,10 @@ const ALLOWED_CODECS: &[&str] = &["H264", "H265", "VP8", "VP9", "AV1"];
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
+    if std::env::var("RUST_LOG").is_err() {
+        std::env::set_var("RUST_LOG", "merdia=debug");
+    }
+    tracing_subscriber::fmt::init();
     gstreamer::init()?;
 
     let webrtcbin_factory =
@@ -93,8 +100,17 @@ async fn main() -> Result<(), anyhow::Error> {
     loop {
         tokio::select! {
             res = &mut server_loop => return Ok(res?),
-            Some(_msg) = msg_stream.next() => {
-                //eprintln!("gstreamer message: {:?}", msg.view());
+            Some(msg) = msg_stream.next() => {
+                let v = msg.view();
+                use gstreamer::MessageView::*;
+                match v {
+                    StateChanged(s) => {
+                        trace!(current = ?s.current(), prev = ?s.old(), src = ?msg.src(), "gstreamer state changed")
+                    }
+                    v => {
+                        debug!(?v, "gstreamer message");
+                    }
+                }
             }
         }
     }
@@ -162,6 +178,7 @@ async fn screen_share(
         let _webrtc = values[0].get::<Element>().expect("Invalid argument");
         let mlineindex = values[1].get::<u32>().expect("Invalid argument");
         let candidate = values[2].get::<String>().expect("Invalid argument");
+        debug!(%candidate, "got ICE candidate");
 
         if let Some(candidate_tx) = candidate_tx.lock().unwrap().as_ref() {
             let _ = candidate_tx.try_send(WebRTCCandidate {
@@ -174,59 +191,66 @@ async fn screen_share(
         None
     });
 
+    peer_conn.connect("on-negotiation-needed", false, move |values| {
+        info!("negotiation needed!");
+        None
+    });
+
     peer_conn.connect_notify(None, move |conn, param| {
         if param.value_type() == WebRTCSignalingState::static_type() {
             match conn.property(param.name()) {
-                WebRTCSignalingState::Stable => eprintln!("connection established!"),
-                WebRTCSignalingState::Closed => eprintln!("connection closed!"),
-                s => eprintln!("signaling state changed to: {:?}", s),
+                WebRTCSignalingState::Stable => info!("connection established!"),
+                WebRTCSignalingState::Closed => info!("connection closed!"),
+                state => info!(?state, "signaling state changed"),
             }
         } else if param.value_type() == WebRTCICEGatheringState::static_type() {
             match conn.property(param.name()) {
                 WebRTCICEGatheringState::Complete => {
                     // close the channel by dropping to end the HTTP response
                     candidate_tx2.lock().unwrap().take();
-                    eprintln!("ICE gathering complete")
+                    info!("ICE gathering complete")
                 }
-                s => eprintln!("ICE gathering state changed to: {:?}", s),
+                state => info!(?state, "ICE gathering state changed"),
             }
         } else {
-            eprintln!(
-                "Property changed: {}: {:?}",
-                param.name(),
-                param.value_type()
+            debug!(
+                name = %param.name(),
+                value_type = ?param.value_type(),
+                "property changed",
             );
         }
     });
 
     peer_conn.connect_pad_added(|_conn, pad| {
-        eprintln!("added pad: {:?}", pad);
+        info!(?pad, "added pad");
 
         // todo: handle new stream
     });
 
     // read peer offer
     let sdp = SDPMessage::parse_buffer(params.offer.as_bytes())?;
-    //eprintln!("offer sdp: {:#?}", sdp);
     let offer = WebRTCSessionDescription::new(WebRTCSDPType::Offer, sdp);
+    info!("got SDP offer");
 
     // Allow us to receive the video track
     let caps = caps_for_offer(&offer)?;
-    eprintln!("using caps: {:#?}", caps);
     let transceiver: WebRTCRTPTransceiver = peer_conn.emit_by_name(
         "add-transceiver",
         &[&WebRTCRTPTransceiverDirection::Recvonly, &caps],
     );
+    info!("added transceiver");
     transceiver.set_property("do_nack", true);
     transceiver.set_property("fec-type", WebRTCFECType::UlpRed);
 
     state.pipeline.add(&peer_conn)?;
     peer_conn.sync_state_with_parent()?;
+    debug!("added to pipeline");
 
     // Set the remote SessionDescription
     let (prom, set_remote_fut) = Promise::new_future();
     peer_conn.emit_by_name::<()>("set-remote-description", &[&offer, &Some(prom)]);
     let _ = set_remote_fut.await;
+    info!("set remote description");
 
     // Create an answer
     let (prom, create_answer_fut) = Promise::new_future();
@@ -250,7 +274,6 @@ async fn screen_share(
         r#type: answer.type_(),
         sdp: answer.sdp(),
     };
-    // eprintln!("answer: {:#?}", answer);
     let stream = stream::once(async { WebRTCResponse::Answer(answer) })
         .chain(ReceiverStream::new(candidate_rx).map(WebRTCResponse::Candidate))
         .map(|r| serde_json::to_string(&r));

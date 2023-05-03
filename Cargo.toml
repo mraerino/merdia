@@ -15,5 +15,7 @@ serde = { version = "1.0.159", features = ["derive"] }
 serde_json = "1.0.95"
 tokio = { version = "1.27.0", features = ["macros", "rt-multi-thread", "sync"] }
 tokio-stream = { version = "0.1.12", features = ["sync"] }
+tracing = "0.1.37"
+tracing-subscriber = "0.3.17"
 # Use regular version once this commit has been released
 webrtc = { git = "https://github.com/webrtc-rs/webrtc", rev = "5aa49c03a183a610b44fe01e9531508e4fddecb1" }
