@@ -8,9 +8,7 @@ use axum::{
     Json, Router,
 };
 use futures_util::{stream, Stream, StreamExt};
-use gstreamer::{
-    message::StateChanged, prelude::*, promise::Promise, Caps, Element, ElementFactory, Pipeline,
-};
+use gstreamer::{prelude::*, promise::Promise, Caps, Element, ElementFactory, Pipeline};
 use gstreamer_sdp::SDPMessage;
 use gstreamer_webrtc::{
     WebRTCBundlePolicy, WebRTCFECType, WebRTCICEGatheringState, WebRTCRTPTransceiver,
@@ -191,7 +189,7 @@ async fn screen_share(
         None
     });
 
-    peer_conn.connect("on-negotiation-needed", false, move |values| {
+    peer_conn.connect("on-negotiation-needed", false, move |_values| {
         info!("negotiation needed!");
         None
     });

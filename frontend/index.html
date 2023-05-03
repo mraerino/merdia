@@ -13,41 +13,88 @@
   <script type="module">
     import { JSONParser } from "https://unpkg.com/@streamparser/json@0.0.13/dist/mjs/index.js";
 
-    async function* parseJsonObjectStream(stream, handler) {
-      const parser = new JSONParser({ paths: ["$"], separator: "" });
+    // from https://itnext.io/understand-async-iterators-665259680044
+    const makeStream = function () {
+      const pullQueue = []
+      const pushQueue = []
+      let done = false
+      const pushValue = async (args) => {
+        if (pullQueue.length !== 0) {
+          const resolver = pullQueue.shift()
+          resolver(...args)
+        } else {
+          pushQueue.push(args)
+        }
+      }
 
-      const reader = stream.getReader();
-      let nextData;
-      while (true) {
-        const nextValue = new Promise((resolve) => {
-          parser.onValue = resolve
-        });
+      const pullValue = () => {
+        return new Promise((resolve) => {
+          if (pushQueue.length !== 0) {
+            const args = pushQueue.shift()
+            resolve(...args)
+          } else {
+            pullQueue.push(resolve)
+          }
+        })
+      }
 
-        if (nextData) {
-          const { done, value } = nextData;
-          if (value) {
-            try {
-              parser.write(value);
-            } catch (e) {
-              console.error("failed to parse json", e);
-              return;
+      return {
+        [Symbol.asyncIterator]() {
+          return this
+        },
+        next: () => {
+          if (pushQueue.length > 0) {
+            return {
+              done: false,
+              value: Promise.resolve(...pushQueue.shift()),
             }
           }
           if (done) {
-            yield (await nextValue).value;
+            return { done, value: undefined }
+          }
+          return { done: false, value: pullValue() }
+        },
+        return: () => {
+          done = true
+          return { done }
+        },
+        throw: (error) => {
+          done = true
+          return {
+            done,
+            value: Promise.reject(error)
+          }
+        },
+        push: (...args) => {
+          pushValue(args)
+        }
+      }
+    }
+
+    async function* parseJsonObjectStream(stream, handler) {
+      const values = makeStream();
+
+      const parser = new JSONParser({ paths: ["$"], separator: "" });
+      parser.onValue = values.push
+      parser.onEnd = values.return
+
+      let done = false;
+      const reader = stream.getReader();
+      (async () => {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (value) {
+            parser.write(value);
+          }
+          if (done) {
+            parser.end();
             return
           }
         }
+      })()
 
-        const reading = reader.read();
-        const output = await Promise.race([nextValue, reading])
-        if ("done" in output) {
-          nextData = output;
-        } else {
-          yield output.value;
-          // ensure we process the requested data if the `nextValue` promise won
-          nextData = await reading;
-        }
+      for await (const item of values) {
+        yield (await item).value
       }
     }
 
@@ -62,19 +109,37 @@
       const peerConn = new RTCPeerConnection({
         iceServers: [],
       });
+
+      // events
       peerConn.addEventListener("iceconnectionstatechange", () =>
-        console.debug("connection state change:", peerConn.iceConnectionState)
+        console.debug("ice connection state change:", peerConn.iceConnectionState)
       );
+      peerConn.addEventListener("connectionstatechange", () => {
+        console.debug("connection state change:", peerConn.connectionState)
+      })
+      peerConn.addEventListener("icecandidateerror", ({ address, url, errorText }) => {
+        console.error("ice candidate error:", { address, url, errorText })
+      })
+      peerConn.addEventListener("signalingstatechange", () => {
+        console.debug("signaling state changed:", peerConn.signalingState)
+      })
+
       const gatherPromise = new Promise((resolve) => {
-        peerConn.addEventListener("icecandidate", ({ candidate }) => {
+        const candidates = [];
+        const cb = ({ candidate }) => {
           if (candidate === null) {
-            resolve()
+            peerConn.removeEventListener("icecandidate", cb)
+            resolve(candidates)
+          } else {
+            candidates.push(candidate)
+            console.debug("got ice candidate", { candidate })
           }
-        })
+        }
+        peerConn.addEventListener("icecandidate", cb)
       })
 
       const stream = await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);
-      stream.getTracks().forEach(track => peerConn.addTrack(track, stream));
+      peerConn.addStream(stream);
 
       const initialOffer = await peerConn.createOffer();
       await peerConn.setLocalDescription(initialOffer);
@@ -96,21 +161,22 @@
       const signalingStream = parseJsonObjectStream(resp.body);
       const { done, value } = await signalingStream.next();
       if (value.answer) {
-        console.log("setting remote description", value.answer)
+        console.debug("setting remote description", value.answer)
         await peerConn.setRemoteDescription(value.answer)
       } else {
-        console.log("invalid json item when expecting SDP answer", value)
+        console.error("invalid json item when expecting SDP answer", value)
       }
 
       if (!done) {
         // add ice candidates in the background
         (async () => {
           for await (const value of signalingStream) {
-            if (value.candidate) {
-              console.log("adding candidate", value.candidate)
-              await peerConn.addIceCandidate(value.candidate)
+            const resolved = await value;
+            if (resolved.candidate) {
+              console.debug("adding candidate", resolved.candidate)
+              await peerConn.addIceCandidate(resolved.candidate)
             } else {
-              console.log("invalid json item", value)
+              console.error("invalid json item", resolved)
             }
           }
         })()
