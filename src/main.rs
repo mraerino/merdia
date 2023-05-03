@@ -25,6 +25,8 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, info, trace};
 
+mod macos_workaround;
+
 enum HttpError {
     InternalServerError(anyhow::Error),
 }
@@ -56,8 +58,14 @@ const FRONTEND: &[u8] = include_bytes!("../frontend/index.html");
 static WEBRTCBIN_FACTORY: OnceCell<ElementFactory> = OnceCell::new();
 const ALLOWED_CODECS: &[&str] = &["H264", "H265", "VP8", "VP9", "AV1"];
 
-#[tokio::main]
-async fn main() -> Result<(), anyhow::Error> {
+fn main() -> Result<(), anyhow::Error> {
+    macos_workaround::run(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(run())
+    })
+}
+
+async fn run() -> Result<(), anyhow::Error> {
     if std::env::var("RUST_LOG").is_err() {
         std::env::set_var("RUST_LOG", "merdia=debug");
     }
