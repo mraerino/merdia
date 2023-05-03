@@ -11,8 +11,9 @@ use futures_util::{stream, Stream, StreamExt};
 use gstreamer::{prelude::*, promise::Promise, Caps, Element, ElementFactory, Pipeline};
 use gstreamer_sdp::SDPMessage;
 use gstreamer_webrtc::{
-    WebRTCBundlePolicy, WebRTCFECType, WebRTCICEGatheringState, WebRTCRTPTransceiver,
-    WebRTCRTPTransceiverDirection, WebRTCSDPType, WebRTCSessionDescription, WebRTCSignalingState,
+    WebRTCBundlePolicy, WebRTCFECType, WebRTCICEConnectionState, WebRTCICEGatheringState,
+    WebRTCRTPTransceiver, WebRTCRTPTransceiverDirection, WebRTCSDPType, WebRTCSessionDescription,
+    WebRTCSignalingState,
 };
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize, Serializer};
@@ -218,6 +219,9 @@ async fn screen_share(
                 }
                 state => info!(?state, "ICE gathering state changed"),
             }
+        } else if param.value_type() == WebRTCICEConnectionState::static_type() {
+            let state: WebRTCICEConnectionState = conn.property(param.name());
+            info!(?state, "ICE connection state changed");
         } else {
             debug!(
                 name = %param.name(),
