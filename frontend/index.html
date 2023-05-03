@@ -13,26 +13,42 @@
   <script type="module">
     import { JSONParser } from "https://unpkg.com/@streamparser/json@0.0.13/dist/mjs/index.js";
 
-    async function parseJsonObjectStream(stream, handler) {
+    async function* parseJsonObjectStream(stream, handler) {
       const parser = new JSONParser({ paths: ["$"], separator: "" });
-      parser.onValue = handler;
 
       const reader = stream.getReader();
-      const parse = async () => {
-        const { done, value } = await reader.read();
-        if (done) {
-          parser.end();
-          return;
+      let nextData;
+      while (true) {
+        const nextValue = new Promise((resolve) => {
+          parser.onValue = resolve
+        });
+
+        if (nextData) {
+          const { done, value } = nextData;
+          if (value) {
+            try {
+              parser.write(value);
+            } catch (e) {
+              console.error("failed to parse json", e);
+              return;
+            }
+          }
+          if (done) {
+            yield (await nextValue).value;
+            return
+          }
         }
-        try {
-          parser.write(value);
-        } catch (e) {
-          console.error("failed to parse json", e);
-          return;
+
+        const reading = reader.read();
+        const output = await Promise.race([nextValue, reading])
+        if ("done" in output) {
+          nextData = output;
+        } else {
+          yield output.value;
+          // ensure we process the requested data if the `nextValue` promise won
+          nextData = await reading;
         }
-        await parse();
-      };
-      await parse();
+      }
     }
 
     const displayMediaOptions = {
@@ -70,27 +86,35 @@
         headers: {
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({ offer: peerConn.localDescription })
+        body: JSON.stringify({ offer: peerConn.localDescription.sdp })
       });
 
       if (!resp.ok) {
         throw new Error(`Invalid response: ${resp.status}, ${await resp.text()}`)
       }
 
-      const remoteDesc = await new Promise((resolve, reject) => {
-        parseJsonObjectStream(resp.body, ({ value }) => {
-          if (value.offer) {
-            resolve(value.offer);
-          } else if (value.candidate) {
-            console.log("adding candidate", value.candidate)
-            peerConn.addIceCandidate(value.candidate)
-          } else {
-            console.log("invalid json item", value)
+      const signalingStream = parseJsonObjectStream(resp.body);
+      const { done, value } = await signalingStream.next();
+      if (value.answer) {
+        console.log("setting remote description", value.answer)
+        await peerConn.setRemoteDescription(value.answer)
+      } else {
+        console.log("invalid json item when expecting SDP answer", value)
+      }
+
+      if (!done) {
+        // add ice candidates in the background
+        (async () => {
+          for await (const value of signalingStream) {
+            if (value.candidate) {
+              console.log("adding candidate", value.candidate)
+              await peerConn.addIceCandidate(value.candidate)
+            } else {
+              console.log("invalid json item", value)
+            }
           }
-        })
-      })
-      console.log("setting remote description", remoteDesc)
-      peerConn.setRemoteDescription(remoteDesc)
+        })()
+      }
 
       return peerConn;
     }
