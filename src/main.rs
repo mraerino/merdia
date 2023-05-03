@@ -9,8 +9,10 @@ use axum::{
 };
 use futures_util::{stream, Stream, StreamExt};
 use gstreamer::{
-    glib::clone::Downgrade, prelude::*, promise::Promise, Bin, Caps, Element, ElementFactory,
-    PadDirection, Pipeline,
+    glib::{clone::Downgrade, ExitCode},
+    prelude::*,
+    promise::Promise,
+    Bin, Caps, Element, ElementFactory, PadDirection, Pipeline,
 };
 use gstreamer_sdp::SDPMessage;
 use gstreamer_webrtc::{
@@ -18,6 +20,7 @@ use gstreamer_webrtc::{
     WebRTCRTPTransceiver, WebRTCRTPTransceiverDirection, WebRTCSDPType, WebRTCSessionDescription,
     WebRTCSignalingState,
 };
+use gtk::prelude::{ApplicationExt, ApplicationExtManual};
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize, Serializer};
 use std::{
@@ -25,9 +28,9 @@ use std::{
     net::Ipv6Addr,
     sync::{Arc, Mutex},
 };
-use tokio::sync::mpsc;
+use tokio::{runtime::Handle, sync::mpsc};
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 
 mod macos_workaround;
 
@@ -56,6 +59,7 @@ where
 
 struct ServerState {
     pipeline: Pipeline,
+    ui_tx: mpsc::Sender<UIMessage>,
 }
 
 const FRONTEND: &[u8] = include_bytes!("../frontend/index.html");
@@ -63,34 +67,77 @@ const ALLOWED_CODECS: &[&str] = &["H264", "H265", "VP8", "VP9", "AV1"];
 
 static WEBRTCBIN_FACTORY: OnceCell<ElementFactory> = OnceCell::new();
 static DECODEBIN_FACTORY: OnceCell<ElementFactory> = OnceCell::new();
-static VIDEOOUTBIN: OnceCell<Bin> = OnceCell::new();
+static GTKGLSINK_FACTORY: OnceCell<ElementFactory> = OnceCell::new();
+static GLSINKBIN_FACTORY: OnceCell<ElementFactory> = OnceCell::new();
+static VIDEOPROCESSBIN: OnceCell<Bin> = OnceCell::new();
+
+#[derive(Clone, Debug)]
+enum UIMessage {
+    CreateWindowFor(Arc<Element>),
+}
+
+fn create_ui(app: &gtk::Application, mut rx: mpsc::Receiver<UIMessage>) {
+    let c = gtk::glib::MainContext::default();
+    let app = app.clone();
+    c.spawn_local(async move {
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                UIMessage::CreateWindowFor(el) => {
+                    let widget: gtk::Widget = el.property("widget");
+                    info!(?widget, "got widget to place in window");
+                    // todo
+                }
+            }
+        }
+        app.quit();
+    });
+}
 
 fn main() -> Result<(), anyhow::Error> {
-    macos_workaround::run(|| {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(run())
-    })
+    if std::env::var("RUST_LOG").is_err() {
+        std::env::set_var("RUST_LOG", "merdia=debug");
+    }
+    tracing_subscriber::fmt::init();
+    gstreamer::init()?;
+    gtk::init()?;
+
+    let (ui_tx, ui_rx) = mpsc::channel(10);
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.spawn(run(ui_tx)); // start in the background
+
+    // initialize GUI
+    let app = gtk::Application::new(None, gtk::gio::ApplicationFlags::FLAGS_NONE);
+    let ui_rx = Mutex::new(Some(ui_rx));
+    app.connect_activate(move |app| {
+        if let Some(rx) = ui_rx.lock().unwrap().take() {
+            create_ui(app, rx);
+            return;
+        }
+        warn!("app was activated multiple times, ignoring");
+    });
+
+    let code = app.run();
+    if code != ExitCode::SUCCESS {
+        return Err(anyhow!("gtk app failed: {:?}", code));
+    }
+
+    Ok(())
 }
 
 fn find_element(name: &str) -> ElementFactory {
     ElementFactory::find(name).unwrap_or_else(|| panic!("Could not find {}", name))
 }
 
-async fn run() -> Result<(), anyhow::Error> {
-    if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "merdia=debug");
-    }
-    tracing_subscriber::fmt::init();
-    gstreamer::init()?;
-
+async fn run(ui_tx: mpsc::Sender<UIMessage>) -> Result<(), anyhow::Error> {
     WEBRTCBIN_FACTORY.set(find_element("webrtcbin")).unwrap();
     DECODEBIN_FACTORY.set(find_element("decodebin")).unwrap();
-    let videoout_bin = gstreamer::parse_bin_from_description(
-        "queue ! videoconvert ! videoscale ! autovideosink",
-        true,
-    )
-    .expect("failed to create videoout bin");
-    VIDEOOUTBIN.set(videoout_bin).unwrap();
+    GTKGLSINK_FACTORY.set(find_element("gtkglsink")).unwrap();
+    GLSINKBIN_FACTORY.set(find_element("glsinkbin")).unwrap();
+    let video_process_bin =
+        gstreamer::parse_bin_from_description("queue ! videoconvert ! videoscale", true)
+            .expect("failed to create video processing bin");
+    VIDEOPROCESSBIN.set(video_process_bin).unwrap();
 
     let pipeline = Pipeline::new(None);
     let bus = pipeline.bus().unwrap();
@@ -100,7 +147,7 @@ async fn run() -> Result<(), anyhow::Error> {
         .set_state(gstreamer::State::Playing)
         .expect("Couldn't set pipeline to Playing");
 
-    let state = ServerState { pipeline };
+    let state = Arc::new(ServerState { pipeline, ui_tx });
 
     let app = Router::new()
         .route(
@@ -115,7 +162,7 @@ async fn run() -> Result<(), anyhow::Error> {
             }),
         )
         .route("/screen_share", post(screen_share))
-        .with_state(Arc::new(state));
+        .with_state(state);
 
     let mut server_loop =
         axum::Server::bind(&(Ipv6Addr::LOCALHOST, 3000).into()).serve(app.into_make_service());
@@ -202,7 +249,7 @@ async fn screen_share(
         let candidate = values[2].get::<String>().expect("Invalid argument");
         debug!(%candidate, "got ICE candidate");
 
-        if let Some(candidate_tx) = candidate_tx.lock().unwrap().as_ref() {
+        if let Some(candidate_tx) = candidate_tx.lock().unwrap().as_mut() {
             let _ = candidate_tx.try_send(WebRTCCandidate {
                 candidate,
                 sdp_mline_index: Some(mlineindex),
@@ -246,6 +293,7 @@ async fn screen_share(
         }
     });
 
+    let handle = Handle::current();
     let state_ref = state.downgrade();
     peer_conn.connect_pad_added(move |_conn, pad| {
         if pad.direction() != PadDirection::Src {
@@ -258,6 +306,7 @@ async fn screen_share(
         info!(?pad, "added webrtc pad");
         let decoder = DECODEBIN_FACTORY.get().unwrap().create().build().unwrap();
         let state_ref = state.downgrade();
+        let inner_handle = handle.clone();
         decoder.connect_pad_added(move |_dec, pad| {
             let caps = pad.current_caps().unwrap();
             let name = caps.structure(0).unwrap().name();
@@ -269,11 +318,30 @@ async fn screen_share(
 
             let Some(state) = state_ref.upgrade() else { return };
 
-            let sink = VIDEOOUTBIN.get().unwrap().clone();
-            state.pipeline.add(&sink).unwrap();
-            sink.sync_state_with_parent().unwrap();
+            let gtkglsink = Arc::new(GTKGLSINK_FACTORY.get().unwrap().create().build().unwrap());
+            let glsinkbin = GLSINKBIN_FACTORY
+                .get()
+                .unwrap()
+                .create()
+                .property("sink", &*gtkglsink)
+                .build()
+                .unwrap();
+            state.pipeline.add(&glsinkbin).unwrap();
 
-            let sinkpad = sink.static_pad("sink").unwrap();
+            let gtksink_for_msg = Arc::clone(&gtkglsink);
+            let state_for_msg = Arc::clone(&state);
+            inner_handle.spawn(async move {
+                let _ = state_for_msg
+                    .ui_tx
+                    .send(UIMessage::CreateWindowFor(gtksink_for_msg))
+                    .await;
+            });
+
+            let processing = VIDEOPROCESSBIN.get().unwrap().clone();
+            state.pipeline.add(&processing).unwrap();
+            processing.link(&glsinkbin).unwrap();
+
+            let sinkpad = processing.static_pad("sink").unwrap();
             pad.link(&sinkpad).unwrap();
         });
 
