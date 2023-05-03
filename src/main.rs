@@ -8,7 +8,10 @@ use axum::{
     Json, Router,
 };
 use futures_util::{stream, Stream, StreamExt};
-use gstreamer::{prelude::*, promise::Promise, Caps, Element, ElementFactory, Pipeline};
+use gstreamer::{
+    glib::clone::Downgrade, prelude::*, promise::Promise, Bin, Caps, Element, ElementFactory,
+    PadDirection, Pipeline,
+};
 use gstreamer_sdp::SDPMessage;
 use gstreamer_webrtc::{
     WebRTCBundlePolicy, WebRTCFECType, WebRTCICEConnectionState, WebRTCICEGatheringState,
@@ -56,14 +59,21 @@ struct ServerState {
 }
 
 const FRONTEND: &[u8] = include_bytes!("../frontend/index.html");
-static WEBRTCBIN_FACTORY: OnceCell<ElementFactory> = OnceCell::new();
 const ALLOWED_CODECS: &[&str] = &["H264", "H265", "VP8", "VP9", "AV1"];
+
+static WEBRTCBIN_FACTORY: OnceCell<ElementFactory> = OnceCell::new();
+static DECODEBIN_FACTORY: OnceCell<ElementFactory> = OnceCell::new();
+static VIDEOOUTBIN: OnceCell<Bin> = OnceCell::new();
 
 fn main() -> Result<(), anyhow::Error> {
     macos_workaround::run(|| {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(run())
     })
+}
+
+fn find_element(name: &str) -> ElementFactory {
+    ElementFactory::find(name).unwrap_or_else(|| panic!("Could not find {}", name))
 }
 
 async fn run() -> Result<(), anyhow::Error> {
@@ -73,9 +83,14 @@ async fn run() -> Result<(), anyhow::Error> {
     tracing_subscriber::fmt::init();
     gstreamer::init()?;
 
-    let webrtcbin_factory =
-        gstreamer::ElementFactory::find("webrtcbin").expect("Could not find webrtcbin");
-    WEBRTCBIN_FACTORY.set(webrtcbin_factory).unwrap();
+    WEBRTCBIN_FACTORY.set(find_element("webrtcbin")).unwrap();
+    DECODEBIN_FACTORY.set(find_element("decodebin")).unwrap();
+    let videoout_bin = gstreamer::parse_bin_from_description(
+        "queue ! videoconvert ! videoscale ! autovideosink",
+        true,
+    )
+    .expect("failed to create videoout bin");
+    VIDEOOUTBIN.set(videoout_bin).unwrap();
 
     let pipeline = Pipeline::new(None);
     let bus = pipeline.bus().unwrap();
@@ -231,10 +246,42 @@ async fn screen_share(
         }
     });
 
-    peer_conn.connect_pad_added(|_conn, pad| {
-        info!(?pad, "added pad");
+    let state_ref = state.downgrade();
+    peer_conn.connect_pad_added(move |_conn, pad| {
+        if pad.direction() != PadDirection::Src {
+            debug!(?pad, "ignoring non-src pad");
+            return;
+        }
 
-        // todo: handle new stream
+        let Some(state) = state_ref.upgrade() else { return };
+
+        info!(?pad, "added webrtc pad");
+        let decoder = DECODEBIN_FACTORY.get().unwrap().create().build().unwrap();
+        let state_ref = state.downgrade();
+        decoder.connect_pad_added(move |_dec, pad| {
+            let caps = pad.current_caps().unwrap();
+            let name = caps.structure(0).unwrap().name();
+
+            if !name.starts_with("video/") {
+                debug!(?caps, "ignoring pad with non-video cap");
+                return;
+            }
+
+            let Some(state) = state_ref.upgrade() else { return };
+
+            let sink = VIDEOOUTBIN.get().unwrap().clone();
+            state.pipeline.add(&sink).unwrap();
+            sink.sync_state_with_parent().unwrap();
+
+            let sinkpad = sink.static_pad("sink").unwrap();
+            pad.link(&sinkpad).unwrap();
+        });
+
+        state.pipeline.add(&decoder).unwrap();
+        decoder.sync_state_with_parent().unwrap();
+
+        let sinkpad = decoder.static_pad("sink").unwrap();
+        pad.link(&sinkpad).unwrap();
     });
 
     // read peer offer
