@@ -11,27 +11,41 @@
 <body>
   <button id="start">Start!</button>
   <script type="module">
+    // @ts-check
+
     import { JSONParser } from "https://unpkg.com/@streamparser/json@0.0.13/dist/mjs/index.js";
 
     // from https://itnext.io/understand-async-iterators-665259680044
+    /**
+     * @template T
+     * @returns {AsyncIterator<T> & AsyncIterable<T> & { push: (item: T) => void }}
+     */
     const makeStream = function () {
+      /** @type {((item: T) => void)[]} */
       const pullQueue = []
+      /** @type {T[]} */
       const pushQueue = []
       let done = false
-      const pushValue = async (args) => {
+      /**
+       * @param {T} item
+       */
+      const pushValue = (item) => {
         if (pullQueue.length !== 0) {
           const resolver = pullQueue.shift()
-          resolver(...args)
+          resolver(item)
         } else {
-          pushQueue.push(args)
+          pushQueue.push(item)
         }
       }
 
+      /**
+       * @returns {Promise<T>}
+       */
       const pullValue = () => {
         return new Promise((resolve) => {
           if (pushQueue.length !== 0) {
-            const args = pushQueue.shift()
-            resolve(...args)
+            const item = pushQueue.shift()
+            resolve(item)
           } else {
             pullQueue.push(resolve)
           }
@@ -42,31 +56,28 @@
         [Symbol.asyncIterator]() {
           return this
         },
-        next: () => {
+        next: (...args) => {
           if (pushQueue.length > 0) {
-            return {
+            return Promise.resolve({
               done: false,
-              value: Promise.resolve(...pushQueue.shift()),
-            }
+              value: pushQueue.shift(),
+            })
           }
           if (done) {
-            return { done, value: undefined }
+            return Promise.resolve({ done, value: undefined })
           }
-          return { done: false, value: pullValue() }
+          return pullValue().then(value => ({ done: false, value }))
         },
         return: () => {
           done = true
-          return { done }
+          return Promise.resolve({ done, value: undefined })
         },
         throw: (error) => {
           done = true
-          return {
-            done,
-            value: Promise.reject(error)
-          }
+          return Promise.reject(error)
         },
-        push: (...args) => {
-          pushValue(args)
+        push: (item) => {
+          pushValue(item)
         }
       }
     }
@@ -98,11 +109,10 @@
       }
     }
 
+    /** @type {DisplayMediaStreamOptions} */
     const displayMediaOptions = {
-      video: {
-        cursor: "always",
-      },
-      audio: false
+      video: true,
+      audio: false,
     };
 
     const connectWebRTC = async () => {
@@ -117,7 +127,7 @@
       peerConn.addEventListener("connectionstatechange", () => {
         console.debug("connection state change:", peerConn.connectionState)
       })
-      peerConn.addEventListener("icecandidateerror", ({ address, url, errorText }) => {
+      peerConn.addEventListener("icecandidateerror", (/** @type {RTCPeerConnectionIceErrorEvent} */{ address, url, errorText }) => {
         console.error("ice candidate error:", { address, url, errorText })
       })
       peerConn.addEventListener("signalingstatechange", () => {
@@ -139,7 +149,7 @@
       })
 
       const stream = await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);
-      peerConn.addStream(stream);
+      stream.getTracks().forEach(t => peerConn.addTrack(t, stream))
 
       const initialOffer = await peerConn.createOffer();
       await peerConn.setLocalDescription(initialOffer);
