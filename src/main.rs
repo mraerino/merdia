@@ -10,7 +10,7 @@ use axum::{
 use futures_util::{stream, Stream, StreamExt};
 use gstreamer::{
     glib::clone::Downgrade, prelude::*, promise::Promise, Bin, Caps, Element, ElementFactory,
-    PadDirection, Pipeline,
+    PadDirection, Pipeline, Structure,
 };
 use gstreamer_sdp::SDPMessage;
 use gstreamer_webrtc::{
@@ -25,7 +25,7 @@ use std::{
     net::Ipv6Addr,
     sync::{Arc, Mutex},
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, info, trace, warn};
 use webrtc_ice::candidate::{candidate_base::unmarshal_candidate, Candidate};
@@ -58,6 +58,7 @@ where
 
 struct ServerState {
     pipeline: Pipeline,
+    mixer: Element,
 }
 
 const FRONTEND: &[u8] = include_bytes!("../frontend/index.html");
@@ -78,6 +79,32 @@ fn find_element(name: &str) -> ElementFactory {
     ElementFactory::find(name).unwrap_or_else(|| panic!("Could not find {}", name))
 }
 
+type PipelineParts = (Pipeline, Element, watch::Receiver<(i32, i32)>);
+
+fn create_pipeline() -> Result<PipelineParts, anyhow::Error> {
+    let pipeline = Pipeline::new(None);
+
+    let kmssink = find_element("kmssink")
+        .create()
+        .property("driver-name", "virtio_gpu") // todo: auto-detect
+        .property("can-scale", false)
+        .property("force-modesetting", true)
+        .build()?;
+    let mixer = find_element("glvideomixer").create().build()?;
+
+    let (sizing_tx, sizing_rx) = watch::channel((0, 0));
+    kmssink.connect_notify(Some("display-width"), move |sink, _param| {
+        let width = sink.property::<i32>("display-width");
+        let height = sink.property::<i32>("display-height");
+        let _ = sizing_tx.send((width, height));
+    });
+
+    pipeline.add_many(&[&kmssink, &mixer])?;
+    mixer.link(&kmssink)?;
+
+    Ok((pipeline, mixer, sizing_rx))
+}
+
 async fn run() -> Result<(), anyhow::Error> {
     if std::env::var("RUST_LOG").is_err() {
         std::env::set_var("RUST_LOG", "merdia=debug");
@@ -87,14 +114,11 @@ async fn run() -> Result<(), anyhow::Error> {
 
     WEBRTCBIN_FACTORY.set(find_element("webrtcbin")).unwrap();
     DECODEBIN_FACTORY.set(find_element("decodebin")).unwrap();
-    let videoout_bin = gstreamer::parse_bin_from_description(
-        "queue ! videoconvert ! videoscale ! autovideosink",
-        true,
-    )
-    .expect("failed to create videoout bin");
+    let videoout_bin = gstreamer::parse_bin_from_description("queue ! videoconvert", true)
+        .expect("failed to create videoout bin");
     VIDEOOUTBIN.set(videoout_bin).unwrap();
 
-    let pipeline = Pipeline::new(None);
+    let (pipeline, mixer, mut sizing_changed) = create_pipeline()?;
     let bus = pipeline.bus().unwrap();
     let mut msg_stream = bus.stream().fuse();
 
@@ -102,7 +126,37 @@ async fn run() -> Result<(), anyhow::Error> {
         .set_state(gstreamer::State::Playing)
         .expect("Couldn't set pipeline to Playing");
 
-    let state = ServerState { pipeline };
+    let state = Arc::new(ServerState { pipeline, mixer });
+
+    let mut init_sizing_rx = sizing_changed.clone();
+    let init_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        if init_sizing_rx.changed().await.is_ok() {
+            let src = find_element("videotestsrc")
+                .create()
+                .property_from_str("pattern", "smpte")
+                .build()
+                .unwrap();
+            init_state.pipeline.add(&src).unwrap();
+            src.sync_state_with_parent().unwrap();
+
+            let (w, h) = &*init_sizing_rx.borrow();
+            let filter_props = Structure::builder("video/x-raw")
+                .field("width", w)
+                .field("height", h)
+                .build();
+            let filter = Caps::builder_full_with_any_features()
+                .structure(filter_props)
+                .build();
+            src.link_filtered(&init_state.mixer, &filter).unwrap();
+        }
+    });
+
+    tokio::spawn(async move {
+        while sizing_changed.changed().await.is_ok() {
+            debug!("canvas size changed: {:?}", &*sizing_changed.borrow());
+        }
+    });
 
     let app = Router::new()
         .route(
@@ -117,7 +171,7 @@ async fn run() -> Result<(), anyhow::Error> {
             }),
         )
         .route("/screen_share", post(screen_share))
-        .with_state(Arc::new(state));
+        .with_state(state);
 
     let mut server_loop =
         axum::Server::bind(&(Ipv6Addr::LOCALHOST, 3000).into()).serve(app.into_make_service());
@@ -284,6 +338,8 @@ async fn screen_share(
             let sink = VIDEOOUTBIN.get().unwrap().clone();
             state.pipeline.add(&sink).unwrap();
             sink.sync_state_with_parent().unwrap();
+
+            sink.link(&state.mixer).unwrap();
 
             let sinkpad = sink.static_pad("sink").unwrap();
             pad.link(&sinkpad).unwrap();
