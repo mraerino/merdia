@@ -9,7 +9,6 @@ use futures_util::{future::Either, TryFutureExt};
 use once_cell::sync::OnceCell;
 use stun_codec::{
     define_attribute_enums,
-    macros::{track_assert, track_panic},
     rfc5389::{attributes::*, errors::BadRequest, methods::BINDING},
     rfc5780::attributes::*,
     Message, MessageClass, MessageDecoder, MessageEncoder,
