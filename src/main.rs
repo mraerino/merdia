@@ -175,7 +175,7 @@ async fn run() -> Result<(), anyhow::Error> {
         .with_state(state);
 
     let mut server_loop =
-        axum::Server::bind(&(Ipv6Addr::LOCALHOST, 3000).into()).serve(app.into_make_service());
+        axum::Server::bind(&(Ipv6Addr::UNSPECIFIED, 3000).into()).serve(app.into_make_service());
 
     let stun_server = stun::Server::new().start((Ipv6Addr::UNSPECIFIED, 3478).into());
     tokio::pin!(stun_server);
