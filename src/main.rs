@@ -337,6 +337,13 @@ async fn screen_share(
             let Some(state) = state_ref.upgrade() else { return };
 
             let sink = VIDEOOUTBIN.get().unwrap().clone();
+            let queue = sink.by_name("queue0").unwrap();
+            queue.connect("overrun", false, |_| {
+                debug!("queue experienced overrun, dropping old buffers");
+                // todo: turn into metric
+                None
+            });
+
             state.pipeline.add(&sink).unwrap();
             sink.sync_state_with_parent().unwrap();
 
