@@ -323,16 +323,20 @@ async fn screen_share(
     let answer: WebRTCSessionDescription = reply.get("answer")?;
     info!("created answer");
 
-    // Set the LocalDescription
-    let (prom, set_local_fut) = Promise::new_future();
-    peer_conn.emit_by_name::<()>("set-local-description", &[&answer, &prom]);
-    let _ = set_local_fut.await; // todo: error handling
-
-    let answer = SessionDescription {
+    let webrtc_answer = SessionDescription {
         r#type: answer.type_(),
         sdp: answer.sdp(),
     };
-    let stream = stream::once(async { WebRTCResponse::Answer(answer) })
+
+    tokio::spawn(async move {
+        // Set the LocalDescription
+        let (prom, set_local_fut) = Promise::new_future();
+        peer_conn.emit_by_name::<()>("set-local-description", &[&answer, &prom]);
+        let _ = set_local_fut.await; // todo: error handling
+        debug!("set local description");
+    });
+
+    let stream = stream::once(async { WebRTCResponse::Answer(webrtc_answer) })
         .chain(ReceiverStream::new(candidate_rx).map(WebRTCResponse::Candidate))
         .map(|r| serde_json::to_string(&r));
     debug!("returning response stream");
