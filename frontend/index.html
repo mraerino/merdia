@@ -198,6 +198,8 @@
             if ('candidate' in value) {
               console.debug("adding candidate", value.candidate)
               await peerConn.addIceCandidate(value.candidate)
+            } else if ('error' in value) {
+              console.warn("error from server:", value.error)
             } else {
               console.error("invalid json item", value)
             }

@@ -27,7 +27,7 @@ use std::{
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 use webrtc_ice::candidate::{candidate_base::unmarshal_candidate, Candidate};
 
 mod macos_workaround;
@@ -186,6 +186,7 @@ struct SessionDescription {
 enum WebRTCResponse {
     Answer(SessionDescription),
     Candidate(WebRTCCandidate),
+    Error(#[serde(serialize_with = "use_display")] anyhow::Error),
 }
 
 async fn screen_share(
@@ -202,6 +203,7 @@ async fn screen_share(
 
     let (events_tx, events_rx) = mpsc::channel(20);
     let events_tx = Arc::new(events_tx);
+    let error_events_tx = Arc::clone(&events_tx);
 
     let candidate_events_tx = Arc::downgrade(&events_tx);
     peer_conn.connect("on-ice-candidate", false, move |values| {
@@ -210,12 +212,12 @@ async fn screen_share(
         let candidate = values[2].get::<String>().expect("Invalid argument");
         debug!(%candidate, "got ICE candidate");
 
-        if let Some(candidate_tx) = candidate_events_tx.upgrade() {
-            let _ = candidate_tx.try_send(WebRTCCandidate {
+        if let Some(events_tx) = candidate_events_tx.upgrade() {
+            let _ = events_tx.try_send(WebRTCResponse::Candidate(WebRTCCandidate {
                 candidate,
                 sdp_mline_index: Some(mlineindex),
                 ..Default::default()
-            });
+            }));
         }
 
         None
@@ -343,12 +345,21 @@ async fn screen_share(
         // Set the LocalDescription
         let (prom, set_local_fut) = Promise::new_future();
         peer_conn.emit_by_name::<()>("set-local-description", &[&answer, &prom]);
-        let _ = set_local_fut.await; // todo: error handling
-        debug!("set local description");
+        if let Err(err) = set_local_fut.await {
+            let _ = error_events_tx
+                .send(WebRTCResponse::Error(anyhow!(
+                    "failed to set local description: {:?}",
+                    err
+                )))
+                .await;
+            warn!(?err, "failed to set local description");
+        } else {
+            debug!("set local description");
+        }
     });
 
     let stream = stream::once(async { WebRTCResponse::Answer(webrtc_answer) })
-        .chain(ReceiverStream::new(events_rx).map(WebRTCResponse::Candidate))
+        .chain(ReceiverStream::new(events_rx))
         .map(|r| serde_json::to_string(&r));
     debug!("returning response stream");
     Ok(StreamBody::new(stream))
