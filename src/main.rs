@@ -28,6 +28,7 @@ use std::{
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, info, trace};
+use webrtc_ice::candidate::{candidate_base::unmarshal_candidate, Candidate};
 
 mod macos_workaround;
 mod stun;
@@ -292,6 +293,7 @@ async fn screen_share(
 
     // read peer offer
     let sdp = SDPMessage::parse_buffer(params.offer.as_bytes())?;
+    let sdp = cleanup_invalid_candidates(sdp);
     let offer = WebRTCSessionDescription::new(WebRTCSDPType::Offer, sdp);
     info!("got SDP offer");
 
@@ -382,4 +384,36 @@ fn caps_for_offer(offer: &WebRTCSessionDescription) -> Result<Caps, anyhow::Erro
     }
 
     Ok(caps)
+}
+
+// we're going to remove any `candidate` attributes from
+// the SDP media if they don't contain a valid IP address.
+//
+// we might receive ICE candidates with an mDNS address
+// those cause a delay (10s i think) before timing out
+// the mDNS lookup which halts the entire transaction.
+//
+// for why browsers do this, see:
+// https://bloggeek.me/psa-mdns-and-local-ice-candidates-are-coming/
+fn cleanup_invalid_candidates(mut sdp: SDPMessage) -> SDPMessage {
+    for media in sdp.medias_mut() {
+        let mut removal = Vec::new();
+        for (i, attr) in media.attributes().enumerate() {
+            if attr.key() == "candidate" {
+                if let Some(val) = attr.value() {
+                    if let Ok(candidate) = unmarshal_candidate(val) {
+                        if candidate.addr().ip().is_unspecified() {
+                            debug!(addr = %candidate.address(), "dropping invalid candidate");
+                            removal.push(i);
+                        }
+                    }
+                }
+            }
+        }
+        // remove in reverse so the relevant indices don't change when removing
+        for idx in removal.into_iter().rev() {
+            let _ = media.remove_attribute(idx as u32);
+        }
+    }
+    sdp
 }
