@@ -82,6 +82,10 @@
       }
     }
 
+    /**
+     * @template T
+     * @returns {AsyncGenerator<T, void, T>}
+     */
     async function* parseJsonObjectStream(stream, handler) {
       const values = makeStream();
 
@@ -173,9 +177,14 @@
         throw new Error(`Invalid response: ${resp.status}, ${await resp.text()}`)
       }
 
+      /**
+       * @typedef {{ answer: RTCSessionDescription } | { candidate: RTCIceCandidate } | { error: string }} SignalingEvent
+       */
+
+      /** @type {AsyncGenerator<SignalingEvent, void, SignalingEvent>} */
       const signalingStream = parseJsonObjectStream(resp.body);
       const { done, value } = await signalingStream.next();
-      if (value.answer) {
+      if (value && 'answer' in value) {
         console.debug("setting remote description", value.answer)
         await peerConn.setRemoteDescription(value.answer)
       } else {
@@ -186,12 +195,11 @@
         // add ice candidates in the background
         (async () => {
           for await (const value of signalingStream) {
-            const resolved = await value;
-            if (resolved.candidate) {
-              console.debug("adding candidate", resolved.candidate)
-              await peerConn.addIceCandidate(resolved.candidate)
+            if ('candidate' in value) {
+              console.debug("adding candidate", value.candidate)
+              await peerConn.addIceCandidate(value.candidate)
             } else {
-              console.error("invalid json item", resolved)
+              console.error("invalid json item", value)
             }
           }
         })()
