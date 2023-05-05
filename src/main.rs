@@ -114,8 +114,9 @@ async fn run() -> Result<(), anyhow::Error> {
 
     WEBRTCBIN_FACTORY.set(find_element("webrtcbin")).unwrap();
     DECODEBIN_FACTORY.set(find_element("decodebin")).unwrap();
-    let videoout_bin = gstreamer::parse_bin_from_description("queue ! videoconvert", true)
-        .expect("failed to create videoout bin");
+    let videoout_bin =
+        gstreamer::parse_bin_from_description("queue leaky=downstream ! videoconvert", true)
+            .expect("failed to create videoout bin");
     VIDEOOUTBIN.set(videoout_bin).unwrap();
 
     let (pipeline, mixer, mut sizing_changed) = create_pipeline()?;
