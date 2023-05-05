@@ -30,6 +30,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, info, trace};
 
 mod macos_workaround;
+mod stun;
 
 enum HttpError {
     InternalServerError(anyhow::Error),
@@ -119,9 +120,14 @@ async fn run() -> Result<(), anyhow::Error> {
 
     let mut server_loop =
         axum::Server::bind(&(Ipv6Addr::LOCALHOST, 3000).into()).serve(app.into_make_service());
+
+    let stun_server = stun::Server::new().start((Ipv6Addr::UNSPECIFIED, 3478).into());
+    tokio::pin!(stun_server);
+
     loop {
         tokio::select! {
             res = &mut server_loop => return Ok(res?),
+            res = &mut stun_server => res?,
             Some(msg) = msg_stream.next() => {
                 let v = msg.view();
                 use gstreamer::MessageView::*;

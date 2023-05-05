@@ -117,7 +117,12 @@
 
     const connectWebRTC = async () => {
       const peerConn = new RTCPeerConnection({
-        iceServers: [],
+        iceServers: [{
+          urls: [
+            "stun:[fd26:1180:47b7:f214:dc28:59ff:fecd:49a6]",
+            "stun:[192.168.64.2]"
+          ]
+        }],
       });
 
       // events
@@ -127,8 +132,8 @@
       peerConn.addEventListener("connectionstatechange", () => {
         console.debug("connection state change:", peerConn.connectionState)
       })
-      peerConn.addEventListener("icecandidateerror", (/** @type {RTCPeerConnectionIceErrorEvent} */{ address, url, errorText }) => {
-        console.error("ice candidate error:", { address, url, errorText })
+      peerConn.addEventListener("icecandidateerror", (/** @type {RTCPeerConnectionIceErrorEvent} */ev) => {
+        console.debug("ice candidate error:", ev)
       })
       peerConn.addEventListener("signalingstatechange", () => {
         console.debug("signaling state changed:", peerConn.signalingState)
