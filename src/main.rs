@@ -200,16 +200,17 @@ async fn screen_share(
         .property("bundle-policy", WebRTCBundlePolicy::MaxBundle)
         .build()?;
 
-    let (candidate_tx, candidate_rx) = mpsc::channel(20);
-    let candidate_tx = Arc::new(Mutex::new(Some(candidate_tx)));
-    let candidate_tx2 = Arc::clone(&candidate_tx);
+    let (events_tx, events_rx) = mpsc::channel(20);
+    let events_tx = Arc::new(events_tx);
+
+    let candidate_events_tx = Arc::downgrade(&events_tx);
     peer_conn.connect("on-ice-candidate", false, move |values| {
         let _webrtc = values[0].get::<Element>().expect("Invalid argument");
         let mlineindex = values[1].get::<u32>().expect("Invalid argument");
         let candidate = values[2].get::<String>().expect("Invalid argument");
         debug!(%candidate, "got ICE candidate");
 
-        if let Some(candidate_tx) = candidate_tx.lock().unwrap().as_ref() {
+        if let Some(candidate_tx) = candidate_events_tx.upgrade() {
             let _ = candidate_tx.try_send(WebRTCCandidate {
                 candidate,
                 sdp_mline_index: Some(mlineindex),
@@ -225,6 +226,8 @@ async fn screen_share(
         None
     });
 
+    // workaround because `connect_notify` takes `Fn` which cannot hold mutable state
+    let events_dropper = Mutex::new(Some(events_tx));
     peer_conn.connect_notify(None, move |conn, param| {
         if param.value_type() == WebRTCSignalingState::static_type() {
             let state: WebRTCSignalingState = conn.property(param.name());
@@ -233,8 +236,8 @@ async fn screen_share(
             match conn.property(param.name()) {
                 WebRTCICEGatheringState::Complete => {
                     // close the channel by dropping to end the HTTP response
-                    candidate_tx2.lock().unwrap().take();
-                    info!("ICE gathering complete")
+                    events_dropper.lock().unwrap().take();
+                    info!("ICE gathering complete");
                 }
                 state => info!(?state, "ICE gathering state changed"),
             }
@@ -345,7 +348,7 @@ async fn screen_share(
     });
 
     let stream = stream::once(async { WebRTCResponse::Answer(webrtc_answer) })
-        .chain(ReceiverStream::new(candidate_rx).map(WebRTCResponse::Candidate))
+        .chain(ReceiverStream::new(events_rx).map(WebRTCResponse::Candidate))
         .map(|r| serde_json::to_string(&r));
     debug!("returning response stream");
     Ok(StreamBody::new(stream))
