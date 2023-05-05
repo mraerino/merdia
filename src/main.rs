@@ -15,8 +15,8 @@ use gstreamer::{
 use gstreamer_sdp::SDPMessage;
 use gstreamer_webrtc::{
     WebRTCBundlePolicy, WebRTCFECType, WebRTCICEConnectionState, WebRTCICEGatheringState,
-    WebRTCRTPTransceiver, WebRTCRTPTransceiverDirection, WebRTCSDPType, WebRTCSessionDescription,
-    WebRTCSignalingState,
+    WebRTCPeerConnectionState, WebRTCRTPTransceiver, WebRTCRTPTransceiverDirection, WebRTCSDPType,
+    WebRTCSessionDescription, WebRTCSignalingState,
 };
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize, Serializer};
@@ -214,17 +214,14 @@ async fn screen_share(
     });
 
     peer_conn.connect("on-negotiation-needed", false, move |_values| {
-        info!("negotiation needed!");
+        debug!("negotiation needed!");
         None
     });
 
     peer_conn.connect_notify(None, move |conn, param| {
         if param.value_type() == WebRTCSignalingState::static_type() {
-            match conn.property(param.name()) {
-                WebRTCSignalingState::Stable => info!("connection established!"),
-                WebRTCSignalingState::Closed => info!("connection closed!"),
-                state => info!(?state, "signaling state changed"),
-            }
+            let state: WebRTCSignalingState = conn.property(param.name());
+            info!(?state, "signaling state changed");
         } else if param.value_type() == WebRTCICEGatheringState::static_type() {
             match conn.property(param.name()) {
                 WebRTCICEGatheringState::Complete => {
@@ -237,6 +234,9 @@ async fn screen_share(
         } else if param.value_type() == WebRTCICEConnectionState::static_type() {
             let state: WebRTCICEConnectionState = conn.property(param.name());
             info!(?state, "ICE connection state changed");
+        } else if param.value_type() == WebRTCPeerConnectionState::static_type() {
+            let state: WebRTCPeerConnectionState = conn.property(param.name());
+            info!(?state, "Peer connection state changed");
         } else {
             debug!(
                 name = %param.name(),
@@ -321,6 +321,7 @@ async fn screen_share(
         return Err(err.into());
     }
     let answer: WebRTCSessionDescription = reply.get("answer")?;
+    info!("created answer");
 
     // Set the LocalDescription
     let (prom, set_local_fut) = Promise::new_future();
@@ -334,6 +335,7 @@ async fn screen_share(
     let stream = stream::once(async { WebRTCResponse::Answer(answer) })
         .chain(ReceiverStream::new(candidate_rx).map(WebRTCResponse::Candidate))
         .map(|r| serde_json::to_string(&r));
+    debug!("returning response stream");
     Ok(StreamBody::new(stream))
 }
 
