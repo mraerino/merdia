@@ -9,20 +9,25 @@ use axum::{
 };
 use futures_util::{stream, Stream, StreamExt};
 use gstreamer::{
-    glib::clone::Downgrade, prelude::*, promise::Promise, Bin, Caps, Element, ElementFactory,
-    PadDirection, Pipeline, Structure,
+    event,
+    glib::{clone::Downgrade, GString},
+    prelude::*,
+    promise::Promise,
+    Bin, Caps, Element, ElementFactory, EventView, Object as GstObject, Pad, PadDirection,
+    PadProbeData, PadProbeReturn, PadProbeType, Pipeline, Structure,
 };
 use gstreamer_sdp::SDPMessage;
 use gstreamer_webrtc::{
-    WebRTCBundlePolicy, WebRTCICEConnectionState, WebRTCICEGatheringState,
-    WebRTCPeerConnectionState, WebRTCSDPType, WebRTCSessionDescription, WebRTCSignalingState,
+    WebRTCBundlePolicy, WebRTCDTLSTransportState, WebRTCICEConnectionState,
+    WebRTCICEGatheringState, WebRTCPeerConnectionState, WebRTCRTPTransceiver, WebRTCSDPType,
+    WebRTCSessionDescription, WebRTCSignalingState,
 };
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize, Serializer};
 use std::{
     fmt::Display,
     net::Ipv6Addr,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
 };
 use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
@@ -338,7 +343,37 @@ async fn screen_share(
 
         let Some(state) = state_ref.upgrade() else { return };
 
-        info!(?pad, "added webrtc pad");
+        let pad_name: GString = pad.name();
+        info!(?pad, ?pad_name, "added webrtc pad");
+
+        let transceiver: WebRTCRTPTransceiver = pad.property("transceiver");
+        let transport = transceiver.receiver().unwrap().transport().unwrap();
+        transport.connect_state_notify(move |tr| {
+            use WebRTCDTLSTransportState::*;
+            let state = tr.state();
+            debug!(?state, "transport state changed");
+            match tr.state() {
+                Closed | Failed => {
+                    let parent = transceiver
+                        .dynamic_cast_ref::<GstObject>()
+                        .unwrap()
+                        .parent()
+                        .unwrap();
+                    let parent: &Element = parent.downcast_ref().unwrap();
+                    if let Some(pad) = parent.src_pads().iter().find(|p| p.name() == pad_name) {
+                        debug!(?pad, "found src pad");
+                        pad.add_probe(PadProbeType::BLOCK, |pad, _info| {
+                            let peer = pad.peer().unwrap();
+                            pad.unlink(&peer).unwrap();
+                            peer.send_event(event::Eos::new());
+                            PadProbeReturn::Drop
+                        });
+                    }
+                }
+                _ => {}
+            }
+        });
+
         let decoder = DECODEBIN_FACTORY.get().unwrap().create().build().unwrap();
         let state_ref = state.downgrade();
         decoder.connect_pad_added(move |_dec, pad| {
@@ -350,9 +385,21 @@ async fn screen_share(
                 return;
             }
 
+            let decoder_state_ref = Weak::clone(&state_ref);
+            probe_eos(pad, move |pad, _| {
+                debug!("EOS event on decoder pad!");
+                unlink_from_peer_and_maybe_remove(pad, &decoder_state_ref);
+            });
+
             let Some(state) = state_ref.upgrade() else { return };
 
             let sink = VIDEOOUTBIN.get().unwrap().clone();
+            let videoout_state_ref = Weak::clone(&state_ref);
+            probe_eos(&sink.static_pad("src").unwrap(), move |pad, _| {
+                debug!("EOS event on video out bin pad!");
+                unlink_from_peer_and_maybe_remove(pad, &videoout_state_ref);
+            });
+
             let queue = sink.by_name("queue0").unwrap();
             queue.connect("overrun", false, |_| {
                 debug!("queue experienced overrun, dropping old buffers");
@@ -465,4 +512,32 @@ fn cleanup_invalid_candidates(mut sdp: SDPMessage) -> SDPMessage {
         }
     }
     sdp
+}
+
+fn probe_eos<F: Fn(&Pad, &event::Eos) + Send + Sync + 'static>(pad: &Pad, f: F) {
+    pad.add_probe(PadProbeType::EVENT_BOTH, move |pad, info| {
+        if let Some(PadProbeData::Event(ref ev)) = info.data {
+            if let EventView::Eos(eos) = ev.view() {
+                f(pad, eos);
+            }
+        }
+        PadProbeReturn::Ok
+    });
+}
+
+fn unlink_from_peer_and_maybe_remove(pad: &Pad, state: &Weak<ServerState>) {
+    let state = Weak::clone(state);
+    pad.add_probe(PadProbeType::BLOCK, move |pad, _info| {
+        let peer = pad.peer().unwrap();
+        pad.unlink(&peer).unwrap();
+        let elem = pad.parent_element().unwrap();
+        if !elem.pads().iter().any(|p| p.is_linked()) {
+            debug!(src = ?elem.type_(), "element has no more linked pads, removing from pipeline");
+            elem.set_state(gstreamer::State::Null).unwrap();
+            if let Some(state) = state.upgrade() {
+                state.pipeline.remove(&elem).unwrap();
+            }
+        }
+        PadProbeReturn::Drop
+    });
 }
