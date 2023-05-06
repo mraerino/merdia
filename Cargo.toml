@@ -15,7 +15,7 @@ gstreamer-webrtc = { version = "0.20.4", features = ["v1_20"] }
 once_cell = "1.17.1"
 serde = { version = "1.0.159", features = ["derive"] }
 serde_json = "1.0.95"
-stun_codec = { git = "https://github.com/mraerino/stun_codec.git", rev = "6fa010333366a270856c992e159994d76fc80246" }
+stun_codec = "0.3.1"
 thiserror = "1.0.40"
 tokio = { version = "1.27.0", features = ["macros", "net", "rt-multi-thread", "sync"] }
 tokio-stream = { version = "0.1.12", features = ["sync"] }
