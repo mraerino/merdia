@@ -26,7 +26,7 @@ use std::{
 };
 use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 use webrtc_ice::candidate::{candidate_base::unmarshal_candidate, Candidate};
 
 mod macos_workaround;
@@ -185,12 +185,29 @@ async fn run() -> Result<(), anyhow::Error> {
             Some(msg) = msg_stream.next() => {
                 let v = msg.view();
                 use gstreamer::MessageView::*;
+                let src = msg.src().map(|s| s.type_());
                 match v {
                     StateChanged(s) => {
-                        trace!(current = ?s.current(), prev = ?s.old(), src = ?msg.src(), "gstreamer state changed")
+                        trace!(current = ?s.current(), prev = ?s.old(), ?src, "gstreamer state changed")
+                    }
+                    StreamStatus(s) => {
+                        let (t, _) = s.get();
+                        trace!(r#type = ?t, src = ?msg.src(), "stream status notification");
+                    }
+                    StreamStart(m) => {
+                        debug!(?m, ?src, "stream started");
+                    }
+                    Qos(_) => {
+                        trace!("qos notification");
+                    }
+                    Warning(w) => {
+                        warn!(err = ?w.error().message(), debug = ?w.debug(), ?src, "gstreamer warning");
+                    }
+                    Error(e) => {
+                        error!(err = ?e.error().message(), debug = ?e.debug(), ?src, "gstreamer error");
                     }
                     v => {
-                        debug!(?v, "gstreamer message");
+                        debug!(msg = ?v, ?src, "gstreamer message");
                     }
                 }
             }
