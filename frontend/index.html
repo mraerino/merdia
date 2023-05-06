@@ -158,10 +158,23 @@
       })
 
       const stream = await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);
-      stream.getTracks().forEach(t => peerConn.addTrack(t, stream))
+      const track = stream.getVideoTracks()[0];
+      const trackEnd = new Promise(resolve => track.addEventListener("ended", () => {
+        console.debug("track has ended")
+        resolve()
+      }))
+      const sender = peerConn.addTrack(track, stream)
+      console.debug("added track:", track)
 
       const initialOffer = await peerConn.createOffer();
       await peerConn.setLocalDescription(initialOffer);
+
+      sender.transport.addEventListener("error", (e) => {
+        console.debug("transport error:", e)
+      })
+      sender.transport.addEventListener("statechange", () => {
+        console.debug("transport state changed:", sender.transport.state)
+      })
 
       await gatherPromise;
 
@@ -207,7 +220,12 @@
         })()
       }
 
-      return peerConn;
+      await trackEnd;
+      await sender.replaceTrack(null)
+      console.debug("replaced track with null")
+      peerConn.removeTrack(sender)
+      // todo: decide when we should close the peer connection
+      peerConn.close()
     }
 
     document.getElementById("start").addEventListener("click", () => {
