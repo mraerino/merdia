@@ -122,7 +122,7 @@
     const connectWebRTC = async () => {
       const peerConn = new RTCPeerConnection({
         iceServers: [{
-          urls: [
+          urls: [ // todo: update to use location origin
             "stun:[fd26:1180:47b7:f214:dc28:59ff:fecd:49a6]",
             "stun:[192.168.64.2]"
           ]
@@ -221,10 +221,6 @@
       }
 
       await trackEnd;
-      await sender.replaceTrack(null)
-      console.debug("replaced track with null")
-      peerConn.removeTrack(sender)
-      // todo: decide when we should close the peer connection
       peerConn.close()
     }
 
