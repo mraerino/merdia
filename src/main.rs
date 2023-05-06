@@ -14,9 +14,8 @@ use gstreamer::{
 };
 use gstreamer_sdp::SDPMessage;
 use gstreamer_webrtc::{
-    WebRTCBundlePolicy, WebRTCFECType, WebRTCICEConnectionState, WebRTCICEGatheringState,
-    WebRTCPeerConnectionState, WebRTCRTPTransceiver, WebRTCRTPTransceiverDirection, WebRTCSDPType,
-    WebRTCSessionDescription, WebRTCSignalingState,
+    WebRTCBundlePolicy, WebRTCICEConnectionState, WebRTCICEGatheringState,
+    WebRTCPeerConnectionState, WebRTCSDPType, WebRTCSessionDescription, WebRTCSignalingState,
 };
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize, Serializer};
@@ -62,7 +61,6 @@ struct ServerState {
 }
 
 const FRONTEND: &[u8] = include_bytes!("../frontend/index.html");
-const ALLOWED_CODECS: &[&str] = &["H264", "H265", "VP8", "VP9", "AV1"];
 
 static WEBRTCBIN_FACTORY: OnceCell<ElementFactory> = OnceCell::new();
 static DECODEBIN_FACTORY: OnceCell<ElementFactory> = OnceCell::new();
@@ -366,16 +364,6 @@ async fn screen_share(
     let offer = WebRTCSessionDescription::new(WebRTCSDPType::Offer, sdp);
     info!("got SDP offer");
 
-    // Allow us to receive the video track
-    let caps = caps_for_offer(&offer)?;
-    let transceiver: WebRTCRTPTransceiver = peer_conn.emit_by_name(
-        "add-transceiver",
-        &[&WebRTCRTPTransceiverDirection::Recvonly, &caps],
-    );
-    info!("added transceiver");
-    transceiver.set_property("do_nack", true);
-    transceiver.set_property("fec-type", WebRTCFECType::UlpRed);
-
     state.pipeline.add(&peer_conn)?;
     peer_conn.sync_state_with_parent()?;
     debug!("added to pipeline");
@@ -427,41 +415,6 @@ async fn screen_share(
         .map(|r| serde_json::to_string(&r));
     debug!("returning response stream");
     Ok(StreamBody::new(stream))
-}
-
-fn caps_for_offer(offer: &WebRTCSessionDescription) -> Result<Caps, anyhow::Error> {
-    let sdp = offer.sdp();
-    let mut caps = Caps::new_empty();
-    for media in sdp.medias() {
-        for format in media.formats() {
-            let pt = format.parse::<i32>()?;
-            let mut tmpcaps = media
-                .caps_from_media(pt)
-                .ok_or_else(|| anyhow!("failed to get caps for {}", pt))?;
-            {
-                let tmpcaps = tmpcaps.get_mut().unwrap();
-
-                // tmpcaps
-                //     .structure_mut(0)
-                //     .unwrap()
-                //     .set_name("application/x-rtp");
-
-                media.attributes_to_caps(tmpcaps)?;
-            }
-
-            let encoding_name = tmpcaps
-                .structure(0)
-                .unwrap()
-                .get::<&str>("encoding-name")
-                .unwrap();
-
-            if ALLOWED_CODECS.contains(&encoding_name) {
-                caps.get_mut().unwrap().append(tmpcaps);
-            }
-        }
-    }
-
-    Ok(caps)
 }
 
 // we're going to remove any `candidate` attributes from
