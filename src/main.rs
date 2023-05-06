@@ -13,8 +13,8 @@ use gstreamer::{
     glib::{clone::Downgrade, GString},
     prelude::*,
     promise::Promise,
-    Bin, Caps, Element, ElementFactory, EventView, Object as GstObject, Pad, PadDirection,
-    PadProbeData, PadProbeReturn, PadProbeType, Pipeline, Structure,
+    Bin, Caps, DebugGraphDetails, Element, ElementFactory, EventView, Object as GstObject, Pad,
+    PadDirection, PadProbeData, PadProbeReturn, PadProbeType, Pipeline, Structure,
 };
 use gstreamer_sdp::SDPMessage;
 use gstreamer_webrtc::{
@@ -27,9 +27,14 @@ use serde::{Deserialize, Serialize, Serializer};
 use std::{
     fmt::Display,
     net::Ipv6Addr,
+    process::Stdio,
     sync::{Arc, Mutex, Weak},
 };
-use tokio::sync::{mpsc, watch};
+use tokio::{
+    io::AsyncWriteExt,
+    process::Command,
+    sync::{mpsc, watch},
+};
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, error, info, trace, warn};
 use webrtc_ice::candidate::{candidate_base::unmarshal_candidate, Candidate};
@@ -176,6 +181,7 @@ async fn run() -> Result<(), anyhow::Error> {
             }),
         )
         .route("/screen_share", post(screen_share))
+        .route("/debug/pipeline", get(show_pipeline))
         .with_state(state);
 
     let mut server_loop =
@@ -263,6 +269,37 @@ enum WebRTCResponse {
     Answer(SessionDescription),
     Candidate(WebRTCCandidate),
     Error(#[serde(serialize_with = "use_display")] anyhow::Error),
+}
+
+async fn show_pipeline(
+    State(state): State<Arc<ServerState>>,
+) -> Result<(HeaderMap, Vec<u8>), HttpError> {
+    let data = state
+        .pipeline
+        .debug_to_dot_data(DebugGraphDetails::MEDIA_TYPE.union(DebugGraphDetails::CAPS_DETAILS));
+
+    let mut child = Command::new("dot")
+        .arg("-Tsvg")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()?;
+
+    let stdin = child.stdin.as_mut().unwrap();
+    stdin.write_all(data.as_bytes()).await?;
+
+    let out = child.wait_with_output().await?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "failed to execute process: exit code {:?}",
+            out.status.code()
+        )
+        .into());
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.append(CONTENT_TYPE, "image/svg+xml".try_into().unwrap());
+
+    Ok((headers, out.stdout))
 }
 
 async fn screen_share(
