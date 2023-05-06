@@ -137,7 +137,6 @@ async fn run() -> Result<(), anyhow::Error> {
                 .build()
                 .unwrap();
             init_state.pipeline.add(&src).unwrap();
-            src.sync_state_with_parent().unwrap();
 
             let (w, h) = &*init_sizing_rx.borrow();
             let filter_props = Structure::builder("video/x-raw")
@@ -148,6 +147,8 @@ async fn run() -> Result<(), anyhow::Error> {
                 .structure(filter_props)
                 .build();
             src.link_filtered(&init_state.mixer, &filter).unwrap();
+
+            src.sync_state_with_parent().unwrap();
         }
     });
 
