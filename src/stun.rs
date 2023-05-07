@@ -52,11 +52,7 @@ static SOFTWARE: Software = Software::new_static("merdia");
 static UDP_POOL: OnceCell<BytePool> = OnceCell::new();
 
 impl Server {
-    pub fn new() -> Self {
-        Self {}
-    }
-
-    pub async fn start(self, addr: SocketAddr) -> Result<(), Error> {
+    pub async fn start(addr: SocketAddr) -> Result<(), Error> {
         let tcp = TcpListener::bind(addr).await?;
 
         let udp_pool = UDP_POOL.get_or_init(BytePool::new);
