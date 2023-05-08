@@ -1,11 +1,7 @@
 use std::sync::Arc;
 
 use futures_util::StreamExt;
-use gstreamer::{
-    prelude::{ElementExtManual, ObjectExt},
-    traits::{ElementExt, GstBinExt},
-    Bin, Caps, ElementFactory, Pipeline, Structure,
-};
+use gstreamer::{prelude::ObjectExt, traits::ElementExt, Bin, ElementFactory, Pipeline};
 use once_cell::sync::OnceCell;
 use tracing::{debug, error, trace, warn};
 
@@ -43,32 +39,6 @@ impl VideoProcessor {
         let mut msg_stream = bus.stream().fuse();
 
         self.pipeline.set_state(gstreamer::State::Playing)?;
-
-        let mut init_sizing_rx = self.sizing_changed.clone();
-        let init_pipeline = Arc::clone(&self.pipeline);
-        let init_mixer = self.mixer.clone();
-        tokio::spawn(async move {
-            if init_sizing_rx.changed().await.is_ok() {
-                let src = find_element("videotestsrc")
-                    .create()
-                    .property_from_str("pattern", "smpte")
-                    .build()
-                    .unwrap();
-                init_pipeline.add(&src).unwrap();
-
-                let (w, h) = &*init_sizing_rx.borrow();
-                let filter_props = Structure::builder("video/x-raw")
-                    .field("width", w)
-                    .field("height", h)
-                    .build();
-                let filter = Caps::builder_full_with_any_features()
-                    .structure(filter_props)
-                    .build();
-                src.link_filtered(&init_mixer, &filter).unwrap();
-
-                src.sync_state_with_parent().unwrap();
-            }
-        });
 
         while let Some(msg) = msg_stream.next().await {
             let v = msg.view();
