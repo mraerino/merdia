@@ -309,7 +309,7 @@ async fn screen_share(
             state.video_proc.pipeline().add(&sink).unwrap();
             sink.sync_state_with_parent().unwrap();
 
-            sink.link(state.video_proc.mixer()).unwrap();
+            sink.link(&state.mixer).unwrap();
 
             let sinkpad = sink.static_pad("sink").unwrap();
             pad.link(&sinkpad).unwrap();

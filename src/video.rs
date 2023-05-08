@@ -2,12 +2,11 @@ use std::sync::Arc;
 
 use futures_util::StreamExt;
 use gstreamer::{
-    prelude::{ElementExtManual, GstBinExtManual, ObjectExt},
+    prelude::{ElementExtManual, ObjectExt},
     traits::{ElementExt, GstBinExt},
-    Bin, Caps, Element, ElementFactory, Pipeline, Structure,
+    Bin, Caps, ElementFactory, Pipeline, Structure,
 };
 use once_cell::sync::OnceCell;
-use tokio::sync::watch;
 use tracing::{debug, error, trace, warn};
 
 pub fn find_element(name: &str) -> ElementFactory {
@@ -20,8 +19,6 @@ pub static VIDEOOUTBIN: OnceCell<Bin> = OnceCell::new();
 
 pub struct VideoProcessor {
     pipeline: Arc<Pipeline>,
-    mixer: Element,
-    sizing_changed: watch::Receiver<(i32, i32)>,
 }
 
 impl VideoProcessor {
@@ -35,34 +32,9 @@ impl VideoProcessor {
                 .expect("failed to create videoout bin");
         VIDEOOUTBIN.set(videoout_bin).unwrap();
 
-        Self::create_pipeline()
-    }
-
-    fn create_pipeline() -> Result<VideoProcessor, anyhow::Error> {
         let pipeline = Pipeline::new(None);
-
-        let kmssink = find_element("kmssink")
-            .create()
-            .property("driver-name", "virtio_gpu") // todo: auto-detect
-            .property("can-scale", false)
-            .property("force-modesetting", true)
-            .build()?;
-        let mixer = find_element("glvideomixer").create().build()?;
-
-        let (sizing_tx, sizing_rx) = watch::channel((0, 0));
-        kmssink.connect_notify(Some("display-width"), move |sink, _param| {
-            let width = sink.property::<i32>("display-width");
-            let height = sink.property::<i32>("display-height");
-            let _ = sizing_tx.send((width, height));
-        });
-
-        pipeline.add_many(&[&kmssink, &mixer])?;
-        mixer.link(&kmssink)?;
-
         Ok(VideoProcessor {
             pipeline: Arc::new(pipeline),
-            mixer,
-            sizing_changed: sizing_rx,
         })
     }
 
@@ -133,9 +105,5 @@ impl VideoProcessor {
 
     pub fn pipeline(&self) -> &Pipeline {
         &self.pipeline
-    }
-
-    pub fn mixer(&self) -> &Element {
-        &self.mixer
     }
 }
