@@ -1,14 +1,13 @@
 //! Outputting those images
 
 use anyhow::anyhow;
-use drm::control::Mode;
 use glutin::{
-    api::egl::{config::Config, context::NotCurrentContext, display::Display},
+    api::egl::{context::NotCurrentContext, display::Display, surface::Surface},
     config::{Api, ConfigTemplateBuilder, GlConfig},
     context::{AsRawContext, ContextAttributesBuilder, RawContext},
     display::{AsRawDisplay, GlDisplay, RawDisplay},
     prelude::{NotCurrentGlContextSurfaceAccessor, PossiblyCurrentGlContext},
-    surface::{SurfaceAttributesBuilder, WindowSurface},
+    surface::{GlSurface, SurfaceAttributesBuilder, WindowSurface},
 };
 use gstreamer::{traits::GstBinExt, Element, ElementFactory, FlowError, FlowSuccess, Pipeline};
 use gstreamer_app::{AppSink, AppSinkCallbacks};
@@ -25,7 +24,7 @@ use tracing::{debug, info, warn};
 /// Logic to create DRM & GBM devices to get a raw window handle
 mod window {
     use anyhow::anyhow;
-    use drm::control::{self, connector, crtc, encoder, Device, Mode, ModeTypeFlags};
+    use drm::control::{self, connector, crtc, Device, Event, Mode, ModeTypeFlags, PageFlipFlags};
     use gbm::{AsRaw, BufferObjectFlags};
     use raw_window_handle::{GbmDisplayHandle, GbmWindowHandle, RawDisplayHandle, RawWindowHandle};
     use std::{
@@ -68,7 +67,6 @@ mod window {
     pub struct GbmContext {
         dev: gbm::Device<Card>,
         conn: connector::Handle,
-        enc: encoder::Handle,
         crtc: crtc::Handle,
         pub mode: Mode,
         pub surface: gbm::Surface<()>,
@@ -132,7 +130,6 @@ mod window {
             Ok(GbmContext {
                 dev: gbm,
                 conn: conn_info.handle(),
-                enc,
                 crtc,
                 mode,
                 surface,
@@ -150,14 +147,39 @@ mod window {
             window_handle.gbm_surface = self.surface.as_raw() as _;
             window_handle.into()
         }
+
+        /// outputs the current buffer to the hardware
+        /// does not use double buffering, might be glitchy
+        pub fn scanout_hard(&self) -> Result<(), anyhow::Error> {
+            let bo = unsafe { self.surface.lock_front_buffer() }?;
+            let fb = self.dev.add_framebuffer(&bo, 24, 32)?;
+
+            self.dev
+                .set_crtc(self.crtc, Some(fb), (0, 0), &[self.conn], Some(self.mode))?;
+
+            Ok(())
+        }
+
+        pub fn scanout_pageflip(&self) -> Result<(), anyhow::Error> {
+            let bo = unsafe { self.surface.lock_front_buffer() }?;
+            let fb = self.dev.add_framebuffer(&bo, 24, 32)?;
+
+            self.dev
+                .page_flip(self.crtc, fb, PageFlipFlags::EVENT, None)?;
+            // wait for the flip to happen
+            self.dev
+                .receive_events()?
+                .find(|ev| matches!(ev, Event::PageFlip(_)))
+                .ok_or_else(|| anyhow!("no pageflip happened before stream ended"))?;
+            Ok(())
+        }
     }
 }
 
 pub struct DisplaySetup {
     context: NotCurrentContext,
-    display: Display,
-    config: Config,
-    mode: Mode,
+    surface: Surface<WindowSurface>,
+    gbm: window::GbmContext,
 
     gst_context: GLContext,
     gst_display: GLDisplayEGL,
@@ -262,6 +284,9 @@ impl DisplaySetup {
         let renderer = unsafe { Renderer::init_scene(gl) }
             .map_err(|e| anyhow!("failed to create OpenGL setup: {}", e))?;
 
+        surface.swap_buffers(&ctx)?;
+        gbm_ctx.scanout_hard()?;
+
         let ctx = ctx.make_not_current()?;
 
         let caps = VideoCapsBuilder::new()
@@ -346,20 +371,25 @@ impl DisplaySetup {
     }
 
     pub fn size(&self) -> (u16, u16) {
-        self.mode.size()
+        self.gbm.mode.size()
     }
 
-    pub fn main_loop(self) -> Result<(), anyhow::Error> {
+    pub fn main_loop(mut self) -> Result<(), anyhow::Error> {
         loop {
             let (info, buffer) = self.frame_rx.recv()?;
             let frame = VideoFrame::from_buffer_readable_gl(buffer, &info)
                 .map_err(|_| anyhow!("failed to read video frame from buffer"))?;
             let sync_meta = frame.buffer().meta::<GLSyncMeta>().unwrap();
             sync_meta.wait(&self.gst_context);
-            if let Some(texture) = frame.texture_id(0) {
-                unsafe { self.renderer.draw_frame(texture) };
-            }
-            // todo: maybe swap buffer on surface?
+            self.context = {
+                let ctx = self.context.make_current(&self.surface)?;
+                if let Some(texture) = frame.texture_id(0) {
+                    unsafe { self.renderer.draw_frame(texture) };
+                }
+                self.surface.swap_buffers(&ctx)?;
+                self.gbm.scanout_pageflip()?;
+                ctx.make_not_current()?
+            };
         }
     }
 }
