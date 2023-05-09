@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1.0.70"
+anyhow = { version = "1.0.70", features = ["backtrace"] }
 axum = { version = "0.6.12", features = ["macros"] }
 byte-pool = "0.2.4"
 bytecodec = "0.4.15"

@@ -26,7 +26,7 @@ fn main() -> Result<(), anyhow::Error> {
     }
     tracing_subscriber::fmt::init();
 
-    macos_workaround::run(|| {
+    let res = macos_workaround::run(|| {
         // - setup gstreamer pipeline
         let video_proc = Arc::new(video::VideoProcessor::init()?);
 
@@ -78,5 +78,9 @@ fn main() -> Result<(), anyhow::Error> {
 
         // run graphics loop
         display.main_loop()
-    })
+    });
+    if let Err(err) = &res {
+        eprintln!("error backtrace:\n{}", err.backtrace());
+    }
+    res
 }
