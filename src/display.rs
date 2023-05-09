@@ -9,13 +9,18 @@ use glutin::{
     prelude::{NotCurrentGlContextSurfaceAccessor, PossiblyCurrentGlContext},
     surface::{GlSurface, SurfaceAttributesBuilder, WindowSurface},
 };
-use gstreamer::{traits::GstBinExt, Element, ElementFactory, FlowError, FlowSuccess, Pipeline};
+use gstreamer::{
+    prelude::Cast,
+    traits::{ElementExt, GstBinExt},
+    Context, Element, ElementFactory, FlowError, FlowSuccess, Message, MessageView, Pipeline,
+};
 use gstreamer_app::{AppSink, AppSinkCallbacks};
 use gstreamer_gl::{
     gst_video::{VideoCapsBuilder, VideoFormat, VideoFrame, VideoInfo},
-    prelude::VideoFrameGLExt,
+    prelude::{ContextGLExt, VideoFrameGLExt},
     traits::GLContextExt,
     GLBaseMemory, GLContext, GLPlatform, GLSyncMeta, CAPS_FEATURE_MEMORY_GL_MEMORY, GLAPI,
+    GL_DISPLAY_CONTEXT_TYPE,
 };
 use gstreamer_gl_egl::GLDisplayEGL;
 use std::{mem, num::NonZeroU32, sync::mpsc};
@@ -182,7 +187,6 @@ pub struct DisplaySetup {
     gbm: window::GbmContext,
 
     gst_context: GLContext,
-    gst_display: GLDisplayEGL,
     gst_sink: Element,
 
     renderer: Renderer,
@@ -199,8 +203,13 @@ struct Renderer {
     vbo_indices: glow::Buffer,
 }
 
+pub struct ContextProvider {
+    context: GLContext,
+    display: GLDisplayEGL,
+}
+
 impl DisplaySetup {
-    pub fn create(pipeline: &Pipeline) -> Result<Self, anyhow::Error> {
+    pub fn create(pipeline: &Pipeline) -> Result<(Self, ContextProvider), anyhow::Error> {
         // create DRM / GBM stuff
         let gbm_ctx = window::GbmContext::create()?;
         let raw_display_handle = gbm_ctx.raw_display();
@@ -353,17 +362,18 @@ impl DisplaySetup {
             .build()?;
         pipeline.add(&sink)?;
 
-        Ok(DisplaySetup {
-            context: ctx,
-            display,
-            config: cfg,
-            gst_context: gl_context,
-            gst_display,
-            gst_sink: sink,
-            renderer,
-            frame_rx,
-            mode: gbm_ctx.mode,
-        })
+        Ok((
+            DisplaySetup {
+                context: ctx,
+                surface,
+                gbm: gbm_ctx,
+                gst_sink: sink,
+                gst_context: gl_context.clone(),
+                renderer,
+                frame_rx,
+            },
+            ContextProvider::new(gl_context, gst_display),
+        ))
     }
 
     pub fn sink(&self) -> &Element {
@@ -390,6 +400,42 @@ impl DisplaySetup {
                 self.gbm.scanout_pageflip()?;
                 ctx.make_not_current()?
             };
+        }
+    }
+}
+
+impl ContextProvider {
+    fn new(gst_context: GLContext, gst_display: GLDisplayEGL) -> Self {
+        Self {
+            context: gst_context,
+            display: gst_display,
+        }
+    }
+
+    pub fn bus_sync_handler(&self, msg: &Message) {
+        if let MessageView::NeedContext(ctxt) = msg.view() {
+            let context_type = ctxt.context_type();
+            debug!(?context_type, src = ?msg.src(), "context request");
+            if context_type == *GL_DISPLAY_CONTEXT_TYPE {
+                if let Some(el) = msg.src().map(|s| s.downcast_ref::<Element>().unwrap()) {
+                    debug!(?el, "handing glDisplay context to element");
+                    let context = Context::new(context_type, true);
+                    context.set_gl_display(&self.display);
+                    el.set_context(&context);
+                }
+            }
+            if context_type == "gst.gl.app_context" {
+                if let Some(el) = msg.src().map(|s| s.downcast_ref::<Element>().unwrap()) {
+                    debug!(?el, "handing app context to element");
+                    let mut context = Context::new(context_type, true);
+                    {
+                        let context = context.get_mut().unwrap();
+                        let s = context.structure_mut();
+                        s.set("context", &self.context);
+                    }
+                    el.set_context(&context);
+                }
+            }
         }
     }
 }

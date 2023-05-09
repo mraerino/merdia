@@ -31,7 +31,7 @@ fn main() -> Result<(), anyhow::Error> {
         let video_proc = Arc::new(video::VideoProcessor::init()?);
 
         // - setup opengl/egl drawing
-        let display = DisplaySetup::create(video_proc.pipeline())?;
+        let (display, gst_context_provider) = DisplaySetup::create(video_proc.pipeline())?;
 
         // connect mixer to output
         let mixer = ElementFactory::make("glvideomixer").build()?;
@@ -70,7 +70,11 @@ fn main() -> Result<(), anyhow::Error> {
         rt.spawn(async move { stun::Server::start((Ipv6Addr::UNSPECIFIED, 3478).into()).await });
 
         // - run video loop
-        rt.spawn(async move { video_proc.main_loop().await });
+        rt.spawn(async move {
+            video_proc
+                .main_loop(move |msg| gst_context_provider.bus_sync_handler(msg))
+                .await
+        });
 
         // run graphics loop
         display.main_loop()

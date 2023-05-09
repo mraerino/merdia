@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
-use futures_util::StreamExt;
-use gstreamer::{prelude::ObjectExt, traits::ElementExt, Bin, ElementFactory, Pipeline};
+use gstreamer::{
+    prelude::ObjectExt, traits::ElementExt, Bin, BusSyncReply, ElementFactory, Message, Pipeline,
+};
 use once_cell::sync::OnceCell;
+use tokio::sync::mpsc;
 use tracing::{debug, error, trace, warn};
 
 pub fn find_element(name: &str) -> ElementFactory {
@@ -34,13 +36,23 @@ impl VideoProcessor {
         })
     }
 
-    pub async fn main_loop(&self) -> Result<(), anyhow::Error> {
-        let bus = self.pipeline.bus().unwrap();
-        let mut msg_stream = bus.stream().fuse();
+    pub async fn main_loop(
+        &self,
+        sync_handler: impl Fn(&Message) + Send + Sync + 'static,
+    ) -> Result<(), anyhow::Error> {
+        let (msg_tx, mut msg_rx) = mpsc::unbounded_channel();
+        self.pipeline
+            .bus()
+            .unwrap()
+            .set_sync_handler(move |_bus, msg| {
+                sync_handler(msg);
+                let _ = msg_tx.send(msg.to_owned());
+                BusSyncReply::Drop
+            });
 
         self.pipeline.set_state(gstreamer::State::Playing)?;
 
-        while let Some(msg) = msg_stream.next().await {
+        while let Some(msg) = msg_rx.recv().await {
             let v = msg.view();
             use gstreamer::MessageView::*;
             let src = msg.src().map(|s| s.type_());
