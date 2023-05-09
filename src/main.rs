@@ -40,7 +40,7 @@ fn main() -> Result<(), anyhow::Error> {
 
         // initial source for testing
         {
-            let src = ElementFactory::make("videotestsrc")
+            let src = ElementFactory::make("gltestsrc")
                 .property_from_str("pattern", "smpte")
                 .build()?;
             video_proc.pipeline().add(&src)?;
