@@ -4,7 +4,7 @@ use anyhow::anyhow;
 use glutin::{
     api::egl::{context::NotCurrentContext, display::Display, surface::Surface},
     config::{Api, ConfigTemplateBuilder, GlConfig},
-    context::{AsRawContext, ContextAttributesBuilder, RawContext},
+    context::{AsRawContext, ContextApi, ContextAttributesBuilder, RawContext, Version},
     display::{AsRawDisplay, GlDisplay, RawDisplay},
     prelude::{NotCurrentGlContextSurfaceAccessor, PossiblyCurrentGlContext},
     surface::{GlSurface, SurfaceAttributesBuilder, WindowSurface},
@@ -214,7 +214,9 @@ impl DisplaySetup {
         let gbm_ctx = window::GbmContext::create()?;
         let raw_display_handle = gbm_ctx.raw_display();
 
-        let tpl = ConfigTemplateBuilder::default().build();
+        let tpl = ConfigTemplateBuilder::default()
+            .with_api(Api::GLES2)
+            .build();
         let dpl = unsafe { Display::new(raw_display_handle) }?;
         debug!(display = ?dpl, "got EGL display");
         let cfgs = unsafe { dpl.find_configs(tpl) }?;
@@ -253,7 +255,10 @@ impl DisplaySetup {
         );
         let surface = unsafe { display.create_window_surface(&cfg, &surface_attrs) }?;
 
-        let context_attributes = ContextAttributesBuilder::new().build(None);
+        let context_attributes = ContextAttributesBuilder::new()
+            .with_debug(true)
+            .with_context_api(ContextApi::Gles(Some(Version::new(2, 0))))
+            .build(None);
         let ctx = unsafe { display.create_context(&cfg, &context_attributes) }?;
 
         let ctx = ctx.make_current(&surface)?;
@@ -273,7 +278,7 @@ impl DisplaySetup {
             let mut res = GLAPI::empty();
             let a = cfg.api();
             if a.contains(Api::OPENGL) {
-                res.insert(GLAPI::OPENGL3);
+                res.insert(GLAPI::OPENGL);
             }
             if a.contains(Api::GLES1) {
                 res.insert(GLAPI::GLES1);
